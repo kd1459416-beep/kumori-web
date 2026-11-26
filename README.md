@@ -55,4 +55,4 @@ kumori-web/
 カメラ映像と手の検出は、すべてブラウザの中で動きます。
 サーバーに送られるのは、シャッターを押した写真1枚だけです。
 
-Lilian Chiu さんの fog mirror を参考にしています。
+Lilian Chiu さん（[@lilian.chiuuu](https://www.instagram.com/lilian.chiuuu/)）の fog mirror を参考にしています。
