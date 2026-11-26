@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fog</title>
+<style>
+  html,body{margin:0;height:100%;background:#0d0f12;color:#fff;overflow:hidden;
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
+  video{display:none}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+  #over{pointer-events:none}
+
+  /* スタート画面 */
+  #start{position:fixed;inset:0;display:grid;place-content:center;justify-items:center;gap:18px;text-align:center;padding:24px;
+    background:radial-gradient(ellipse at 50% 40%,#e9e6df 0%,#bdb8ae 55%,#8f8a81 100%);color:#2b2925;z-index:10}
+  #start.hide{display:none}
+  #start h1{margin:0;font-size:64px;font-weight:300;letter-spacing:.02em;line-height:1}
+  #start p{margin:0;max-width:30em}
+  #go{font:inherit;font-size:17px;min-height:48px;padding:0 30px;border-radius:999px;border:1px solid rgba(0,0,0,.25);
+    background:rgba(255,255,255,.7);color:#2b2925;cursor:pointer}
+  #go:hover{background:#fff}
+  #go:disabled{opacity:.5;cursor:default}
+  #msg{min-height:1.6em;font-weight:600;color:#7a1d12}
+  .fine{font-size:13px;opacity:.75}
+
+  /* 操作のヒント */
+  #hint{position:fixed;top:14px;left:50%;transform:translateX(-50%);padding:6px 14px;border-radius:999px;font-size:13px;
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.3);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    white-space:nowrap;z-index:5}
+  #note{position:fixed;top:52px;left:50%;transform:translateX(-50%);font-size:12px;opacity:.85;z-index:5;text-align:center}
+
+  /* brush スライダー：左下のすりガラスの錠剤型 */
+  #brushPill{position:fixed;left:18px;bottom:18px;display:flex;align-items:center;gap:12px;padding:8px 18px;border-radius:999px;
+    background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.38);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);z-index:5}
+  #brushPill span{font-size:14px;letter-spacing:.04em;text-transform:lowercase}
+  #brush{width:140px;accent-color:#fff;margin:0;height:28px}
+
+  /* シャッター：右下 */
+  #shutter{position:fixed;right:18px;bottom:14px;width:58px;height:58px;border-radius:50%;border:3px solid #fff;
+    background:rgba(255,255,255,.12);cursor:pointer;z-index:5;padding:0;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  #shutter::after{content:"";position:absolute;inset:6px;border-radius:50%;background:#fff;transition:transform .12s}
+  #shutter:active::after{transform:scale(.86)}
+  button:focus-visible,input:focus-visible{outline:2px solid #fff;outline-offset:3px}
+  #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .35s;z-index:6}
+  #flash.on{opacity:.7;transition:none}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<video id="video" playsinline muted></video>
+<canvas id="view"></canvas>
+<canvas id="over"></canvas>
+
+<div id="hint">つまんで描く ・ グーで拭く ・ 息を吹きかける（Space）とくもる</div>
+<div id="note"></div>
+
+<label id="brushPill"><span>brush</span><input id="brush" type="range" min="7" max="38" value="15" aria-label="brush"></label>
+<button id="shutter" aria-label="写真を保存（S）" title="写真を保存（S）"></button>
+<div id="flash"></div>
+
+<div id="start">
+  <h1>fog</h1>
+  <p>湯気でくもった鏡。息を吹きかけるとくもって、指でなぞると拭けます。</p>
+  <button id="go">カメラとマイクをはじめる</button>
+  <div id="msg" role="alert"></div>
+  <p class="fine">映像・音声・データは、この端末の外に一切送られません。すべてブラウザの中だけで動きます。</p>
+</div>
+
+<script>
+'use strict';
+
+// ============ 定数（動いている版から調整された値） ============
+const HANDS_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
+const FACE_URL  = 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/';
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+const FOG_START   = 0.55;               // 最初のくもりの濃さ
+const BLUR        = 18;                 // くもりのぼかし（CSS px）
+const BRIGHT      = 1.18;               // くもりの明るさ
+const TINT        = 'rgba(242,238,231,0.62)'; // くもりに混ぜる白
+const BLOBS       = 12;                 // 1回の息で散らすかたまりの数
+const BLOB_ALPHA  = 0.36;               // かたまり1つの濃さ
+const BLOB_SOFT   = 0.60;               // かたまりのぼかし（半径に対する割合）
+const REACH       = 0.43;               // 息が届く広さ（画面の短い辺に対する割合）
+const SPREAD_X    = 1.45;               // 横に広がる倍率
+const MOUTH_EASE  = 0.40;               // 息の中心が口を追いかける速さ
+const EASE_RAW    = 0.45;               // 1回目のなめらかさ
+const EASE_BRUSH  = 0.22;               // 2回目のなめらかさ
+const EASE_STAR   = 0.55;               // 星が指先を追う速さ
+const TREMOR      = 0.0006;             // これより小さい動きは手の震えとして無視（画面幅に対する割合）
+const PINCH_DOWN  = 0.22, PINCH_UP = 0.38; // つまむ・離す の境目
+const RELEASE_MS  = 250;                // 離したと判断するまでの時間
+const WIPE_SCALE  = 1.6;                // グーで拭く半径＝手の幅×1.6
+const WIPE_ALPHA  = 0.34;               // 拭くスタンプ1回の強さ
+const WIPE_MAX    = 40;                 // 1フレームのスタンプ上限
+const WIPE_JUMP   = 0.30;               // これ以上飛んだら途中を補わない（画面幅に対する割合）
+
+// ============ 部品 ============
+const $ = (id) => document.getElementById(id);
+const video = $('video'), view = $('view'), over = $('over');
+const vx = view.getContext('2d'), ox = over.getContext('2d');
+const fog = document.createElement('canvas');    // くもりの量だけを持つ（画面には直接出さない）
+const fgx = fog.getContext('2d');
+const frost = document.createElement('canvas');  // ぼかした自分＋白（fog で切り抜いて重ねる）
+const frx = frost.getContext('2d');
+
+let W = 0, H = 0;
+let running = false, raf = 0, frameNo = 0, stream = null;
+let brushR = 15 * DPR;
+let hands = null, face = null, handsBusy = false, faceBusy = false;
+let mouth = null;                         // 顔検出で見つけた口の位置
+const fogC = { x: 0, y: 0 };              // 息の中心（口をゆっくり追いかける）
+const pens = new Map();                   // 手ごとのペンの状態（'Left' / 'Right'）
+let spaceDown = false, lastKeyAt = -1e9;
+const mic = { ctx: null, an: null, buf: null, floor: null };
+
+// ctx.filter が使えるか確かめる（使えないブラウザでは縮小→拡大でぼかす）
+const FILTER_OK = (() => {
+  const c = document.createElement('canvas'); c.width = 6; c.height = 1;
+  const x = c.getContext('2d');
+  if (!('filter' in x)) return false;
+  x.filter = 'blur(2px)'; x.fillStyle = '#fff'; x.fillRect(3, 0, 1, 1);
+  return x.getImageData(1, 0, 1, 1).data[3] > 0;
+})();
+
+// ============ 大きさ ============
+function resize() {
+  const nw = Math.round(innerWidth * DPR), nh = Math.round(innerHeight * DPR);
+  const keep = document.createElement('canvas');
+  if (fog.width) { keep.width = fog.width; keep.height = fog.height; keep.getContext('2d').drawImage(fog, 0, 0); }
+  W = nw; H = nh;
+  view.width = over.width = fog.width = W; view.height = over.height = fog.height = H;
+  frost.width = Math.max(1, W >> 1); frost.height = Math.max(1, H >> 1); // 半分の大きさでぼかす（軽くするため）
+  if (keep.width) fgx.drawImage(keep, 0, 0, W, H); else resetFog();
+  if (!fogC.x) { fogC.x = W / 2; fogC.y = H * 0.55; }
+}
+function resetFog() {
+  fgx.globalCompositeOperation = 'source-over';
+  fgx.clearRect(0, 0, W, H);
+  fgx.fillStyle = `rgba(255,255,255,${FOG_START})`;
+  fgx.fillRect(0, 0, W, H);
+}
+
+// 映像を画面いっぱいに敷いたときの位置（はみ出す分は切る）
+function vrect() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const s = Math.max(W / vw, H / vh);
+  return { dw: vw * s, dh: vh * s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+}
+// MediaPipe の座標（0〜1、反転前）→ 画面のピクセル（鏡なので左右反転）
+function toScreen(p, r) { return { x: W - (r.ox + p.x * r.dw), y: r.oy + p.y * r.dh }; }
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const ease = (a, b, k) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k });
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+// ============ 1. 鏡 → 2. くもり → 3. すりガラス ============
+function render() {
+  const r = vrect();
+  // 1) 自分を左右反転して描く
+  vx.save(); vx.translate(W, 0); vx.scale(-1, 1);
+  vx.drawImage(video, r.ox, r.oy, r.dw, r.dh);
+  vx.restore();
+
+  // 3) すりガラス：ぼかして明るくした自分＋白、を fog の形で切り抜く（destination-in）
+  const fw = frost.width, fh = frost.height;
+  frx.globalCompositeOperation = 'copy';
+  if (FILTER_OK) {
+    frx.filter = `blur(${BLUR * DPR / 2}px) brightness(${BRIGHT})`;
+    frx.drawImage(view, -fw * .03, -fh * .03, fw * 1.06, fh * 1.06); // 少し大きく描いて、ぼかしで端が透けないようにする
+    frx.filter = 'none';
+  } else {
+    const t = document.createElement('canvas'); t.width = Math.max(1, fw >> 4); t.height = Math.max(1, fh >> 4);
+    t.getContext('2d').drawImage(view, 0, 0, t.width, t.height);
+    frx.imageSmoothingQuality = 'high';
+    frx.drawImage(t, 0, 0, fw, fh);
+  }
+  frx.globalCompositeOperation = 'source-over';
+  frx.fillStyle = TINT; frx.fillRect(0, 0, fw, fh);
+  frx.globalCompositeOperation = 'destination-in';
+  frx.drawImage(fog, 0, 0, fw, fh);
+  frx.globalCompositeOperation = 'source-over';
+  vx.imageSmoothingQuality = 'high';
+  vx.drawImage(frost, 0, 0, W, H);
+}
+
+// ============ 息 ============
+function micStrength() {
+  if (!mic.an) return 0;
+  mic.an.getFloatTimeDomainData(mic.buf);
+  let s = 0; for (let i = 0; i < mic.buf.length; i++) s += mic.buf[i] * mic.buf[i];
+  const level = Math.sqrt(s / mic.buf.length);
+  if (mic.floor === null) mic.floor = level;
+  const floor = mic.floor;
+  // 部屋の静かさに合わせて「基準」を動かす：下がるときは速く（5%）、上がるときはとてもゆっくり（0.08%）
+  mic.floor += (level - floor) * (level < floor ? 0.05 : 0.0008);
+  if (performance.now() - lastKeyAt < 300) return 0;     // キーを打った直後は無視
+  return clamp01((level - (floor + 0.0025)) / 0.0005);    // 基準+0.0025で反応、+0.003で最大
+}
+
+function breathe(strength) {
+  const S = Math.min(W, H), reach = REACH * S;
+  const cx = fogC.x, cy = fogC.y + 0.06 * S;               // 息は少し下に落ちる
+  fgx.globalCompositeOperation = 'source-over';
+  for (let i = 0; i < BLOBS; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * reach * 0.55;
+    const x = cx + Math.cos(a) * d * SPREAD_X, y = cy + Math.sin(a) * d;
+    const rad = reach * (0.22 + Math.random() * 0.23);
+    const outer = rad * (1 + BLOB_SOFT), al = BLOB_ALPHA * strength;
+    const g = fgx.createRadialGradient(x, y, 0, x, y, outer);
+    g.addColorStop(0, `rgba(255,255,255,${al})`);
+    g.addColorStop((rad * (1 - BLOB_SOFT)) / outer, `rgba(255,255,255,${al})`);
+    g.addColorStop(rad / outer, `rgba(255,255,255,${al * 0.5})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    fgx.fillStyle = g;
+    fgx.beginPath(); fgx.ellipse(x, y, outer * SPREAD_X, outer, 0, 0, Math.PI * 2); fgx.fill();
+  }
+}
+
+// ============ ペン（つまんで描く） ============
+function newPen() {
+  return { visible: false, lastSeen: 0, down: false, relFrames: 0, relSince: 0,
+           target: null, p1: null, p2: null, prevMid: null, star: null,
+           wiping: false, wipe: null, carry: 0, wipeR: 0 };
+}
+
+function eraseCurve(a, ctrl, b) {
+  fgx.globalCompositeOperation = 'destination-out';
+  fgx.strokeStyle = '#000'; fgx.lineWidth = brushR * 2; fgx.lineCap = 'round'; fgx.lineJoin = 'round';
+  fgx.shadowColor = '#000'; fgx.shadowBlur = brushR * 0.5;   // ふちを少しやわらかく
+  fgx.beginPath(); fgx.moveTo(a.x, a.y); fgx.quadraticCurveTo(ctrl.x, ctrl.y, b.x, b.y); fgx.stroke();
+  fgx.shadowBlur = 0; fgx.shadowColor = 'transparent';
+}
+
+function penDown(pen) {
+  pen.down = true; pen.relFrames = 0;
+  pen.p1 = { ...pen.target }; pen.p2 = { ...pen.target }; pen.prevMid = { ...pen.target };
+  eraseCurve(pen.p2, pen.p2, { x: pen.p2.x + 0.01, y: pen.p2.y });  // 置いた所に点を打つ
+}
+function penUp(pen) {
+  if (pen.down) eraseCurve(pen.prevMid, pen.p2, pen.p2);
+  pen.down = false; pen.relFrames = 0;
+}
+// 離した「らしい」フレーム。2フレーム続き、かつ250ms経ったら本当に離す
+function releaseFrame(pen, now) {
+  if (pen.relFrames === 0) pen.relSince = now;
+  pen.relFrames++;
+  if (pen.relFrames >= 2 && now - pen.relSince >= RELEASE_MS) penUp(pen);
+}
+
+// 毎フレーム：2回なめらかにしてから、中点を通る曲線で消す
+function stepPen(pen) {
+  if (pen.target) pen.star = pen.star ? ease(pen.star, pen.target, EASE_STAR) : { ...pen.target };
+  if (!pen.down || pen.relFrames > 0 || !pen.target) return;
+  pen.p1 = ease(pen.p1, pen.target, EASE_RAW);
+  const np = ease(pen.p2, pen.p1, EASE_BRUSH);
+  if (dist(np, pen.p2) < TREMOR * W) return;
+  const mid = { x: (pen.p2.x + np.x) / 2, y: (pen.p2.y + np.y) / 2 };
+  eraseCurve(pen.prevMid, pen.p2, mid);
+  pen.prevMid = mid; pen.p2 = np;
+}
+
+// ============ グーで拭く ============
+function stamp(c, rad) {
+  const g = fgx.createRadialGradient(c.x, c.y, 0, c.x, c.y, rad);
+  g.addColorStop(0, `rgba(0,0,0,${WIPE_ALPHA})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+  fgx.globalCompositeOperation = 'destination-out';
+  fgx.fillStyle = g; fgx.beginPath(); fgx.arc(c.x, c.y, rad, 0, Math.PI * 2); fgx.fill();
+}
+// 時間ごとではなく「動いた距離ごと」に、半径の半分ごとにスタンプを押す
+function wipeTo(pen, c, rad) {
+  if (!pen.wipe) { pen.wipe = { ...c }; pen.carry = 0; stamp(c, rad); return; }
+  const to = ease(pen.wipe, c, EASE_RAW), from = pen.wipe, d = dist(from, to);
+  if (d > WIPE_JUMP * W) { stamp(to, rad); pen.wipe = to; pen.carry = 0; return; } // 検出が飛んだ：線を引かない
+  // carry＝前のスタンプから動いた距離。合計が半径の半分に届くたびに1回押す
+  const step = rad / 2;
+  let s = step - pen.carry, n = 0, lastS = -1;
+  while (s <= d && n < WIPE_MAX) {
+    const t = s / d;
+    stamp({ x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t }, rad);
+    lastS = s; s += step; n++;
+  }
+  pen.carry = n >= WIPE_MAX ? 0 : (lastS < 0 ? pen.carry + d : d - lastS);
+  pen.wipe = to;
+}
+
+// ============ 手の結果 ============
+function onHands(res) {
+  const now = performance.now(), r = vrect(), seen = new Set();
+  const list = res.multiHandLandmarks || [];
+  list.forEach((lm, i) => {
+    const key = (res.multiHandedness && res.multiHandedness[i] && res.multiHandedness[i].label) || ('h' + i);
+    seen.add(key);
+    let pen = pens.get(key); if (!pen) { pen = newPen(); pens.set(key, pen); }
+    pen.visible = true; pen.lastSeen = now;
+    const P = lm.map((p) => toScreen(p, r));
+
+    const handSize = dist(P[0], P[9]);                         // 手首〜中指の付け根
+    const pinch = dist(P[4], P[8]) / handSize;                  // 手の大きさで割る＝遠くても近くても同じ
+    const fist = [[8, 6], [12, 10], [16, 14], [20, 18]].every(([t, m]) => dist(P[t], P[0]) < dist(P[m], P[0]));
+    const indexOut = dist(P[8], P[0]) > dist(P[6], P[0]);       // 人さし指が伸びている
+    pen.target = { x: (P[4].x + P[8].x) / 2, y: (P[4].y + P[8].y) / 2 };
+
+    if (fist) {                                                 // グー：袖で拭く
+      if (pen.down) penUp(pen);
+      const width = Math.max(dist(P[5], P[17]), dist(P[0], P[9]));
+      const palm = { x: (P[0].x + P[5].x + P[9].x + P[17].x) / 4, y: (P[0].y + P[5].y + P[9].y + P[17].y) / 4 };
+      pen.wiping = true; pen.wipeR = WIPE_SCALE * width;
+      wipeTo(pen, palm, pen.wipeR);
+      return;
+    }
+    if (pen.wiping) { pen.wiping = false; pen.wipe = null; }
+
+    if (!pen.down) {
+      if (pinch < PINCH_DOWN && indexOut) penDown(pen);         // 人さし指の確認はペンを下ろす時だけ
+    } else if (pinch > PINCH_UP) releaseFrame(pen, now);
+    else pen.relFrames = 0;                                     // 0.22〜0.38 のあいだは今の状態を保つ
+  });
+  for (const [key, pen] of pens) {
+    if (seen.has(key)) continue;
+    pen.visible = false;                                        // 手が1フレーム消えても、すぐには離さない
+    if (pen.wiping) { pen.wiping = false; pen.wipe = null; }
+    if (pen.down) releaseFrame(pen, now);
+    if (!pen.down && now - pen.lastSeen > 1500) pens.delete(key);
+  }
+}
+
+function onFace(res) {
+  const det = res.detections && res.detections[0];
+  if (!det) return;
+  const r = vrect();
+  if (det.landmarks && det.landmarks[3]) mouth = toScreen(det.landmarks[3], r); // 3番＝口の中心
+  else { const b = det.boundingBox; mouth = toScreen({ x: b.xCenter, y: b.yCenter + b.height * 0.3 }, r); }
+}
+
+// ============ 星（つまんだ所の目印） ============
+function drawOverlay() {
+  ox.clearRect(0, 0, W, H);
+  for (const pen of pens.values()) {
+    if (!pen.visible || !pen.star || pen.wiping) continue;
+    const s = (pen.down ? 9 : 6) * DPR;
+    ox.save(); ox.translate(pen.star.x, pen.star.y);
+    ox.shadowColor = 'rgba(255,255,255,.95)'; ox.shadowBlur = (pen.down ? 18 : 10) * DPR;
+    ox.fillStyle = pen.down ? '#fff' : 'rgba(255,255,255,.8)';
+    ox.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const rr = i % 2 ? s * 0.32 : s, a = i * Math.PI / 4 - Math.PI / 2;
+      ox.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ox.closePath(); ox.fill(); ox.restore();
+  }
+}
+
+// ============ ループ ============
+function loop() {
+  if (!running) return;
+  raf = requestAnimationFrame(loop);
+  frameNo++;
+  if (video.readyState >= 2) {
+    // 前の処理が終わってから次を送る（camera_utils は使わない）
+    if (hands && !handsBusy) { handsBusy = true; hands.send({ image: video }).finally(() => { handsBusy = false; }); }
+    if (face && !faceBusy && frameNo % 5 === 0) { faceBusy = true; face.send({ image: video }).finally(() => { faceBusy = false; }); }
+  }
+  for (const pen of pens.values()) stepPen(pen);
+
+  const target = mouth || { x: W / 2, y: H * 0.55 };
+  fogC.x += (target.x - fogC.x) * MOUTH_EASE; fogC.y += (target.y - fogC.y) * MOUTH_EASE;
+
+  const strength = Math.max(spaceDown ? 1 : 0, micStrength());
+  let drawing = false; for (const p of pens.values()) if (p.down || p.wiping) drawing = true;
+  if (strength > 0 && !drawing && frameNo % 2 === 0) breathe(strength);  // 描いている間はくもらせない
+
+  render();
+  drawOverlay();
+}
+
+// ============ はじめる・おわる ============
+async function start() {
+  const msg = $('msg');
+  if (location.protocol === 'file:') {
+    msg.textContent = 'ファイルをダブルクリックで開くとカメラが使えません。localhost か https で開いてください（例：python -m http.server）。';
+    return;
+  }
+  $('go').disabled = true; msg.textContent = '';
+  const audioOpts = { echoCancellation: false, noiseSuppression: false, autoGainControl: false }; // 息の音を消させない
+  const videoOpts = { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } };
+  let note = '';
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: videoOpts, audio: audioOpts });
+  } catch (e) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: videoOpts });
+      note = 'マイクが使えないので、息のかわりに Space キーを長押ししてくもらせてね。';
+    } catch (e2) {
+      msg.textContent = e2.name === 'NotAllowedError'
+        ? 'カメラへのアクセスが拒否されました。ブラウザのアドレスバーの設定からカメラを許可して、もう一度押してください。'
+        : 'カメラを起動できませんでした（' + e2.name + '）。ほかのアプリがカメラを使っていないか確認してください。';
+      $('go').disabled = false;
+      return;
+    }
+  }
+  video.srcObject = stream;
+  await video.play();
+
+  if (stream.getAudioTracks().length) {
+    mic.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    mic.an = mic.ctx.createAnalyser(); mic.an.fftSize = 1024;
+    mic.buf = new Float32Array(mic.an.fftSize); mic.floor = null;
+    mic.ctx.createMediaStreamSource(stream).connect(mic.an);
+  }
+
+  if (!hands) {
+    hands = new Hands({ locateFile: (f) => HANDS_URL + f });
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.onResults(onHands);
+    face = new FaceDetection({ locateFile: (f) => FACE_URL + f });
+    face.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+    face.onResults(onFace);
+    // 2つを同時に読み込むと、中の読み込み処理がぶつかって壊れる。1つずつ順番に準備する
+    $('msg').textContent = '';
+    $('go').textContent = '読み込み中…';
+    await hands.initialize();
+    await face.initialize();
+    $('go').textContent = 'カメラとマイクをはじめる';
+  }
+
+  $('note').textContent = note;
+  $('start').classList.add('hide');
+  $('go').disabled = false;
+  resize(); resetFog();
+  running = true; frameNo = 0;
+  raf = requestAnimationFrame(loop);
+}
+
+function stop() {
+  running = false; cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  if (mic.ctx) mic.ctx.close();
+  mic.ctx = mic.an = null;
+  pens.clear(); mouth = null;
+  $('start').classList.remove('hide');
+}
+
+function save() {
+  if (!running) return;
+  view.toBlob((b) => {
+    const a = document.createElement('a');
+    const d = new Date(), p = (n) => String(n).padStart(2, '0');
+    a.download = `fog-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+    a.href = URL.createObjectURL(b);
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, 'image/png');
+  const f = $('flash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
+}
+
+// ============ 操作 ============
+$('go').addEventListener('click', start);
+$('shutter').addEventListener('click', save);
+$('brush').addEventListener('input', (e) => { brushR = Number(e.target.value) * DPR; });
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); spaceDown = true; return; }
+  lastKeyAt = performance.now();                         // タイピングの音で曇らないように
+  if (e.key === 'c' || e.key === 'C') { if (running) resetFog(); }
+  else if (e.key === 's' || e.key === 'S') save();
+  else if (e.key === 'Escape') { if (running) stop(); }
+});
+window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; else lastKeyAt = performance.now(); });
+window.addEventListener('resize', () => { if (running) resize(); });
+</script>
+</body>
+</html>

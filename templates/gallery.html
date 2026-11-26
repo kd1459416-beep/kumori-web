@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ギャラリー | くもりガラス</title>
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="gallery-page">
+  <header>
+    <h1>ギャラリー</h1>
+    <a href="{{ url_for('index') }}">← 鏡にもどる</a>
+  </header>
+  {% if photos %}
+  <ul class="grid">
+    {% for name in photos %}
+    <li><a href="{{ url_for('photo', name=name) }}"><img src="{{ url_for('photo', name=name) }}" alt="くもりガラスの写真" loading="lazy"></a></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">まだ写真がありません。鏡に描いて「写真に残す」から載せてみてね。</p>
+  {% endif %}
+</body>
+</html>

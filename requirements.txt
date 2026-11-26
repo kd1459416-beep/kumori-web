@@ -1,0 +1,2 @@
+flask>=3.1
+pyopenssl>=24.0  # スマホ確認用の https（python app.py --https）で使います
