@@ -44,6 +44,20 @@
   button:focus-visible,input:focus-visible{outline:2px solid #fff;outline-offset:3px}
   #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .35s;z-index:6}
   #flash.on{opacity:.7;transition:none}
+
+  /* ギャラリーへのリンク：右上のすりガラスの錠剤型 */
+  #galleryLink{position:fixed;top:12px;right:18px;display:inline-flex;align-items:center;min-height:36px;padding:0 16px;border-radius:999px;
+    color:#fff;text-decoration:none;font-size:14px;letter-spacing:.04em;z-index:5;
+    background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.38);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+  #galleryLink[hidden]{display:none}
+  #galleryLink:focus-visible,#toast a:focus-visible{outline:2px solid #fff;outline-offset:3px}
+
+  /* 保存したときのお知らせ：下の真ん中に数秒だけ出る */
+  #toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);display:flex;gap:14px;align-items:center;padding:10px 18px;
+    border-radius:999px;background:rgba(20,22,26,.72);border:1px solid rgba(255,255,255,.25);font-size:14px;white-space:nowrap;
+    opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:7;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+  #toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+  #toast a{color:#fff;font-weight:600}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js" crossorigin="anonymous"></script>
@@ -59,6 +73,8 @@
 <label id="brushPill"><span>brush</span><input id="brush" type="range" min="7" max="38" value="15" aria-label="brush"></label>
 <button id="shutter" aria-label="写真を保存（S）" title="写真を保存（S）"></button>
 <div id="flash"></div>
+<a id="galleryLink" href="/gallery" hidden>gallery</a>
+<div id="toast" role="status"><span id="toastText"></span><a id="toastLink" href="/gallery">見る</a></div>
 
 <div id="start">
   <h1>fog</h1>
@@ -443,18 +459,51 @@ function stop() {
   $('start').classList.remove('hide');
 }
 
+// 端末に PNG としてダウンロードする
+function download(blob) {
+  const a = document.createElement('a');
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  a.download = `fog-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+// 画面の下に、数秒だけお知らせを出す
+let toastTimer = 0;
+function toast(text, withLink) {
+  $('toastText').textContent = text;
+  $('toastLink').hidden = !withLink;
+  $('toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.remove('show'), 4000);
+}
+
+// シャッター：今の画面を PNG にして、サーバーのギャラリーに送る
 function save() {
   if (!running) return;
-  view.toBlob((b) => {
-    const a = document.createElement('a');
-    const d = new Date(), p = (n) => String(n).padStart(2, '0');
-    a.download = `fog-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
-    a.href = URL.createObjectURL(b);
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  }, 'image/png');
   const f = $('flash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
+  view.toBlob(async (blob) => {
+    // Flask がない場所（GitHub Pages など）では、最初から端末に保存する
+    if (!hasServer) { download(blob); toast('端末に保存しました', false); return; }
+    try {
+      const res = await fetch('/api/photos', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+      if (!res.ok) throw new Error('status ' + res.status);
+      toast('ギャラリーに保存しました', true);
+    } catch (e) {
+      // Flask を使わずに開いているときなど、送れなかったら端末に保存する
+      download(blob);
+      toast('ギャラリーに送れなかったので、端末に保存しました', false);
+    }
+  }, 'image/png');
 }
+
+// ============ サーバー（Flask）があるか確かめる ============
+// Flask で開いたときだけ /api/photos が返事をくれる。返事があればギャラリーを使えるようにする
+let hasServer = false;
+fetch('/api/photos').then((res) => {
+  if (res.ok) { hasServer = true; $('galleryLink').hidden = false; }
+}).catch(() => {});
 
 // ============ 操作 ============
 $('go').addEventListener('click', start);
